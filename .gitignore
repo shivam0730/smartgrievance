@@ -39,3 +39,22 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+
+# /src/generated
+
+
+/src/generated/prisma/*.d.ts.map
+/src/generated/**/*.tsbuildinfo
+
+
+# AI tooling / IDE
+.agents/
+.claude/
+.cursor/
+.devin/
+.vscode/
+.idea/
+
+# Local scratch files
+inspect.txt

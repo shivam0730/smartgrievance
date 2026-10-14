@@ -1,0 +1,343 @@
+// SmartGrievance - Prisma schema (Prisma 7)
+// NOTE: datasource url lives in prisma.config.ts, not here.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────────────────── Enums ─────────────────────────
+
+enum Role {
+  CITIZEN
+  OFFICER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  INVITED
+}
+
+enum DepartmentStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum Category {
+  POTHOLE
+  GARBAGE
+  DRAINAGE
+  STREETLIGHT
+  WATER_LEAKAGE
+  ROAD_DAMAGE
+  ELECTRICITY
+  OTHER
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum ComplaintStatus {
+  SUBMITTED
+  AI_ANALYSIS
+  ASSIGNED
+  IN_PROGRESS
+  RESOLVED
+  NEEDS_INFORMATION
+  DUPLICATE
+  REJECTED
+  CANCELLED
+}
+
+enum ImageKind {
+  COMPLAINT
+  RESOLUTION
+}
+
+enum AnalysisStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+// Human decision on an AI suspicion flag
+enum HumanReviewStatus {
+  NOT_REQUIRED
+  PENDING
+  CLEARED
+  CONFIRMED
+}
+
+enum NotificationType {
+  COMPLAINT_SUBMITTED
+  AI_ANALYSIS_COMPLETED
+  DEPARTMENT_ASSIGNED
+  OFFICER_ASSIGNED
+  STATUS_CHANGED
+  INFO_REQUESTED
+  COMPLAINT_RESOLVED
+  CRITICAL_COMPLAINT
+  SUSPICIOUS_COMPLAINT
+  DUPLICATE_ALERT
+  REASSIGNED
+  DEPARTMENT_OVERLOAD
+  AI_ANOMALY
+  SYSTEM
+}
+
+enum ResolutionOutcome {
+  YES
+  PARTIALLY
+  NO
+}
+
+// ───────────────────────── Models ─────────────────────────
+
+model User {
+  id           String     @id @default(cuid())
+  clerkUserId  String     @unique
+  name         String
+  email        String     @unique
+  imageUrl     String?
+  role         Role       @default(CITIZEN)
+  status       UserStatus @default(ACTIVE)
+  departmentId String? // set for officers
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  department          Department?           @relation(fields: [departmentId], references: [id])
+  complaints          Complaint[]           @relation("ComplaintCitizen")
+  assignedComplaints  Complaint[]           @relation("ComplaintOfficer")
+  statusChanges       ComplaintStatusHistory[]
+  notifications       Notification[]
+  feedback            Feedback[]
+  auditLogs           AuditLog[]
+  reviewedAnalyses    AIAnalysis[]          @relation("AnalysisReviewer")
+
+  @@index([role])
+  @@index([departmentId])
+}
+
+model Department {
+  id          String           @id @default(cuid())
+  name        String           @unique
+  description String?
+  status      DepartmentStatus @default(ACTIVE)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  officers            User[]
+  complaints          Complaint[]
+  recommendedAnalyses AIAnalysis[] @relation("RecommendedDepartment")
+}
+
+model Complaint {
+  id              String          @id @default(cuid())
+  ticketNumber    String          @unique // human readable, e.g. SG-2026-000123
+  userId          String
+  departmentId    String?
+  assignedOfficerId String?
+  duplicateOfId   String?
+
+  title           String
+  description     String
+  category        Category        @default(OTHER) // final category (human can override AI)
+  status          ComplaintStatus @default(SUBMITTED)
+  priority        Priority        @default(MEDIUM)
+
+  latitude        Float
+  longitude       Float
+  address         String
+
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  resolvedAt      DateTime?
+
+  user            User            @relation("ComplaintCitizen", fields: [userId], references: [id])
+  department      Department?     @relation(fields: [departmentId], references: [id])
+  assignedOfficer User?           @relation("ComplaintOfficer", fields: [assignedOfficerId], references: [id])
+  duplicateOf     Complaint?      @relation("DuplicateOf", fields: [duplicateOfId], references: [id])
+  duplicates      Complaint[]     @relation("DuplicateOf")
+
+  images          ComplaintImage[]
+  aiAnalysis      AIAnalysis?
+  statusHistory   ComplaintStatusHistory[]
+  notifications   Notification[]
+  feedback        Feedback?
+  embedding       ComplaintEmbedding?
+  similarityAsA   ComplaintSimilarity[] @relation("SimilarityA")
+  similarityAsB   ComplaintSimilarity[] @relation("SimilarityB")
+
+  @@index([status])
+  @@index([category])
+  @@index([priority])
+  @@index([departmentId])
+  @@index([userId])
+  @@index([assignedOfficerId])
+  @@index([createdAt])
+  @@index([latitude, longitude])
+}
+
+model ComplaintImage {
+  id          String    @id @default(cuid())
+  complaintId String
+  kind        ImageKind @default(COMPLAINT) // COMPLAINT or officer RESOLUTION evidence
+  imageUrl    String
+  storageKey  String
+  fileName    String
+  mimeType    String
+  sizeBytes   Int?
+  imageHash   String? // exact-match fingerprint (SHA-256)
+  perceptualHash String? // look-alike fingerprint (64-bit dHash, 16 hex chars); survives resizing and re-compression
+  createdAt   DateTime  @default(now())
+
+  complaint   Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+
+  @@index([complaintId])
+  @@index([imageHash])
+  @@index([perceptualHash])
+}
+
+model AIAnalysis {
+  id                      String            @id @default(cuid())
+  complaintId             String            @unique
+  status                  AnalysisStatus    @default(PENDING)
+
+  category                Category?
+  categoryConfidence      Float?
+  severity                Severity?
+  priority                Priority?
+
+  duplicateScore          Float             @default(0) // 0-1
+  suspicionScore          Int               @default(0) // 0-100
+  suspicionReasons        Json?
+  reviewStatus            HumanReviewStatus @default(NOT_REQUIRED)
+  reviewedById            String?
+  reviewedAt              DateTime?
+
+  recommendedDepartmentId String?
+  reasoning               String?
+  signals                 Json? // raw AI outputs and decision signals (used for audit and duplicate/suspicion scoring)
+  model                   String?
+  errorMessage            String?
+
+  createdAt               DateTime          @default(now())
+  updatedAt               DateTime          @updatedAt
+
+  complaint               Complaint         @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  recommendedDepartment   Department?       @relation("RecommendedDepartment", fields: [recommendedDepartmentId], references: [id])
+  reviewedBy              User?             @relation("AnalysisReviewer", fields: [reviewedById], references: [id])
+
+  @@index([suspicionScore])
+  @@index([duplicateScore])
+  @@index([reviewStatus])
+}
+
+model ComplaintSimilarity {
+  id                   String   @id @default(cuid())
+  complaintAId         String
+  complaintBId         String
+  textSimilarity       Float?
+  imageSimilarity      Float?
+  locationSimilarity   Float?
+  distanceMeters       Float?
+  overallScore         Float
+  isConfirmedDuplicate Boolean? // null = not reviewed yet
+  createdAt            DateTime @default(now())
+
+  complaintA           Complaint @relation("SimilarityA", fields: [complaintAId], references: [id], onDelete: Cascade)
+  complaintB           Complaint @relation("SimilarityB", fields: [complaintBId], references: [id], onDelete: Cascade)
+
+  @@unique([complaintAId, complaintBId])
+  @@index([overallScore])
+}
+
+model ComplaintStatusHistory {
+  id          String           @id @default(cuid())
+  complaintId String
+  oldStatus   ComplaintStatus?
+  newStatus   ComplaintStatus
+  changedById String?
+  remarks     String?
+  createdAt   DateTime         @default(now())
+
+  complaint   Complaint        @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  changedBy   User?            @relation(fields: [changedById], references: [id])
+
+  @@index([complaintId])
+}
+
+model Notification {
+  id          String           @id @default(cuid())
+  userId      String
+  complaintId String?
+  type        NotificationType
+  title       String
+  message     String
+  isRead      Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  complaint   Complaint?       @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([createdAt])
+}
+
+model Feedback {
+  id          String            @id @default(cuid())
+  complaintId String            @unique
+  userId      String
+  rating      Int // 1-5, validated with Zod
+  outcome     ResolutionOutcome
+  comment     String?
+  createdAt   DateTime          @default(now())
+
+  complaint   Complaint         @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  user        User              @relation(fields: [userId], references: [id])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String
+  oldValue   Json?
+  newValue   Json?
+  createdAt  DateTime @default(now())
+
+  actor      User?    @relation(fields: [actorId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+}
+
+// Text embedding used for semantic duplicate search.
+// Needs the pgvector extension (created in the migration). Read and written with raw SQL only.
+model ComplaintEmbedding {
+  complaintId String                      @id
+  embedding   Unsupported("vector(768)")
+  model       String
+  createdAt   DateTime                    @default(now())
+
+  complaint   Complaint                   @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+}
